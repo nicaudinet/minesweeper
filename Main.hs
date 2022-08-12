@@ -16,7 +16,6 @@ data TileType = Mine | Num Int | Empty
 data TileStatus = Hidden | Free
 data Tile = Tile TileStatus TileType
 
--- Assumed to be 2D
 type GridSize = '[10,10]
 type Field = Grid GridSize
 type MineField = Field Tile
@@ -24,9 +23,6 @@ type MineField = Field Tile
 data InitTile = InitMine | InitEmpty
   deriving Eq
 type InitMineField = Field InitTile
-
-emptyGrid :: InitMineField
-emptyGrid = generate (const InitEmpty)
 
 -- from https://www.programming-idioms.org/idiom/158/random-sublist/2123/haskell
 randomSample ::Int -> [a] -> IO [a]
@@ -37,18 +33,33 @@ randomSample k x = do
    l <- randomSample (k-1) (a ++ b)
    pure (e : l)
 
--- Assuming a 2D minefield
+
+--------------------
+-- Initialization --
+--------------------
+
+emptyGrid :: InitMineField
+emptyGrid = generate (const InitEmpty)
+
+
+linspace :: [Int] -> [[Int]]
+linspace [] = error "Need at least one dimension for the linspace"
+linspace (x:[]) = [ [a] | a <- [0..x-1] ]
+linspace (x:xs) = map (flip (:)) (linspace xs) <*> [0..x-1]
+
+
 fillWithMines :: Int -> InitMineField -> IO InitMineField
 fillWithMines numMines grid = do
   mineCoords <- randomSample numMines allCoords
   pure (grid // zip mineCoords (repeat InitMine))
   where
-    max1, max2 :: Int
-    max1 = unCoord (maxBound :: Coord GridSize) !! 0
-    max2 = unCoord (maxBound :: Coord GridSize) !! 1
+    -- Get the coordinate space dimentions from the GridSize
+    dims :: [Int]
+    dims = unCoord (maxBound :: Coord GridSize)
 
     allCoords :: [Coord GridSize]
-    allCoords = fromJust $ sequence [ (coord [x,y]) | x <- [0..max1], y <- [0..max2] ]
+    allCoords = fromJust . traverse coord . linspace $ dims
+
 
 calcNeighbors :: InitMineField -> MineField
 calcNeighbors = autoConvolute omitBounds (Tile Hidden . go)
