@@ -13,5 +13,7 @@ executable minesweeper
   build-depends:
       base
     , grids
+    , microlens
+    , random
   default-language:
     Haskell2010
