@@ -12,5 +12,6 @@ executable minesweeper
     -dedupe
   build-depends:
       base
+    , grids
   default-language:
     Haskell2010
