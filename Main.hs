@@ -1,23 +1,44 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
+import Control.Monad.Loops (untilM_)
+import Control.Monad.State
 import Data.Functor.Compose
+import Data.Generics.Product.Fields (field)
 import Data.Grid
 import Data.List (intercalate)
 import Data.Maybe (fromJust, isJust, catMaybes)
 import qualified Data.Set as S
+import GHC.Generics
 import Lens.Micro
 import Lens.Micro.Extras (view)
 import System.Random (randomRIO)
+import Text.Read (readMaybe)
+
+-----------
+-- Types --
+-----------
 
 data TileType = Mine | Num Int | Empty
-data TileStatus = Hidden | Free
-data Tile = Tile TileStatus TileType
+  deriving Eq
 
-type GridSize = '[50,50]
+data TileStatus = Hidden | Free
+  deriving Eq
+
+data Tile = Tile
+  { tileStatus :: TileStatus
+  , tileType :: TileType
+  }
+  deriving (Generic, Eq)
+
+-- Assumed to be 2D
+type GridSize = '[5,5]
 type Field = Grid GridSize
 type MineField = Field Tile
 
@@ -25,18 +46,26 @@ data InitTile = InitMine | InitEmpty
   deriving Eq
 type InitMineField = Field InitTile
 
+data Outcome = Undefined | Win | Lose
+data GameState = GameState
+  { minefield :: MineField
+  , outcome :: Outcome
+  }
+  deriving Generic
+type Game a = StateT GameState IO a
+
 -- Needed in order to keep the coordinates in a set
 instance Ord (Coord dims) where
   compare (Coord a) (Coord b) = compare a b
 
--- from https://www.programming-idioms.org/idiom/158/random-sublist/2123/haskell
-randomSample ::Int -> [a] -> IO [a]
-randomSample 0 x = pure []
-randomSample k x = do
-   i <- randomRIO (0, length x - 1)
-   let (a, e:b) = splitAt i x
-   l <- randomSample (k-1) (a ++ b)
-   pure (e : l)
+
+---------------
+-- Utilities --
+---------------
+
+-- Assuming a 2D gridsize!
+filterGrid :: (a -> Bool) -> Grid GridSize a -> [a]
+filterGrid f = filter f . mconcat . toNestedLists
 
 
 --------------------
@@ -46,12 +75,19 @@ randomSample k x = do
 emptyGrid :: InitMineField
 emptyGrid = generate (const InitEmpty)
 
-
 linspace :: [Int] -> [[Int]]
 linspace [] = []
 linspace (x:[]) = [ [a] | a <- [0..x-1] ]
 linspace (x:xs) = map (flip (:)) (linspace xs) <*> [0..x-1]
 
+-- from https://www.programming-idioms.org/idiom/158/random-sublist/2123/haskell
+randomSample ::Int -> [a] -> IO [a]
+randomSample 0 x = pure []
+randomSample k x = do
+   i <- randomRIO (0, length x - 1)
+   let (a, e:b) = splitAt i x
+   l <- randomSample (k-1) (a ++ b)
+   pure (e : l)
 
 fillWithMines :: Int -> InitMineField -> IO InitMineField
 fillWithMines numMines grid = do
@@ -64,7 +100,6 @@ fillWithMines numMines grid = do
 
     allCoords :: [Coord GridSize]
     allCoords = fromJust . traverse coord . linspace $ dims
-
 
 calcNeighbors :: InitMineField -> MineField
 calcNeighbors = autoConvolute omitBounds (Tile Hidden . go)
@@ -80,7 +115,6 @@ calcNeighbors = autoConvolute omitBounds (Tile Hidden . go)
           let n = countMines neigh
           in if n == 0 then Empty else Num n
 
-
 initGrid :: Int -> IO MineField
 initGrid numMines = fmap calcNeighbors $ fillWithMines numMines emptyGrid
 
@@ -91,10 +125,10 @@ initGrid numMines = fmap calcNeighbors $ fillWithMines numMines emptyGrid
 
 type CoordSet = S.Set (Coord GridSize)
 
-free :: Coord GridSize -> MineField -> MineField
-free coord grid =
-  let Tile _ value = grid ^?! cell coord
-  in grid // [(coord, Tile Free value)]
+free :: Coord GridSize -> Game ()
+free coord =
+  let lens = field @"minefield" . cell coord . field @"tileStatus"
+  in modify (over lens (const Free))
 
 neighbors :: Coord GridSize -> [Coord GridSize]
 neighbors = catMaybes . map coord . neighborCoords . unCoord
@@ -104,21 +138,25 @@ neighbors = catMaybes . map coord . neighborCoords . unCoord
     neighborCoords (x:[]) = [ [a] | a <- [x-1, x, x+1] ]
     neighborCoords (x:xs) = map (flip (:)) (neighborCoords xs) <*> [x-1, x, x+1]
 
+inspect :: Coord GridSize -> Game Tile
+inspect c = gets (^?! field @"minefield" . cell c)
 
-click :: Coord GridSize -> MineField -> MineField
-click coord grid =
-  case grid ^?! cell coord of
-    Tile _ Mine -> free coord grid
-    otherwise -> foldr free grid coords
+click :: Coord GridSize -> Game ()
+click coord = do
+  tile <- inspect coord
+  grid <- gets minefield
+  case tile of
+    Tile _ Mine -> free coord
+    otherwise -> mapM_ free (coords grid)
   where
-    f :: CoordSet -> CoordSet -> CoordSet
-    f look seen =
+    f :: MineField -> CoordSet -> CoordSet -> CoordSet
+    f grid look seen =
       if S.null look
       then seen
-      else uncurry f (foldr g (S.empty, seen) look)
+      else uncurry (f grid) (foldr (g grid) (S.empty, seen) look)
 
-    g :: Coord GridSize -> (CoordSet, CoordSet) -> (CoordSet, CoordSet)
-    g c (look, seen) =
+    g :: MineField -> Coord GridSize -> (CoordSet, CoordSet) -> (CoordSet, CoordSet)
+    g grid c (look, seen) =
       if S.member c seen
       then (look, seen)
       else
@@ -128,14 +166,15 @@ click coord grid =
             in (S.union look ns, S.insert c seen)
           otherwise -> (look, S.insert c seen)
 
-    coords :: CoordSet
-    coords = f (S.singleton coord) S.empty
+    coords :: MineField -> CoordSet
+    coords grid = f grid (S.singleton coord) S.empty
 
 
-----------
--- Main --
-----------
+---------------
+-- Game Loop --
+---------------
 
+-- Assuming 2D GridSize
 showGrid :: MineField -> String
 showGrid = intercalate "\n" . map showRow . toNestedLists
   where
@@ -151,12 +190,82 @@ showGrid = intercalate "\n" . map showRow . toNestedLists
     showTileType (Num i) = show i
     showTileType Empty = "-"
 
-freeAllTiles :: MineField -> MineField
-freeAllTiles = fmap (\(Tile _ x) -> Tile Free x)
+printMinefield :: Game ()
+printMinefield = do
+  grid <- gets minefield
+  liftIO $ putStrLn (showGrid grid)
+
+askUserInput :: Game (Coord GridSize)
+askUserInput = do
+  line <- liftIO getLine
+  case readMaybe line of
+    Nothing -> do
+      liftIO $ putStrLn "Input could not be read, please try again"
+      askUserInput
+    Just list ->
+      case coord list of
+        Nothing -> do
+          liftIO $ putStrLn "Input is out of bounds, please try again"
+          askUserInput
+        Just c -> pure c
+
+mineIsUncovered :: MineField -> Bool
+mineIsUncovered grid = length (filterGrid (== Tile Free Mine) grid) > 0
+
+isMine :: Tile -> Bool
+isMine (Tile _ Mine) = True
+isMine _ = False
+
+isCovered :: Tile -> Bool
+isCovered (Tile Hidden _) = True
+isCovered _ = False
+
+fieldIsClear :: MineField -> Bool
+fieldIsClear grid =
+  let numMines = length (filterGrid isMine grid)
+      numCovered = length (filterGrid isCovered grid)
+  in numMines == numCovered
+
+-- Game ends either when you click on a mine or everything but mines is free
+updateGameState :: Game ()
+updateGameState = do
+  grid <- gets minefield
+  if mineIsUncovered grid
+  then do
+    printMinefield
+    modify (over (field @"outcome") (const Lose))
+  else pure ()
+  if fieldIsClear grid
+  then do
+    printMinefield
+    modify (over (field @"outcome") (const Win))
+  else pure ()
+
+turn :: Game ()
+turn = do
+  printMinefield
+  coord <- askUserInput
+  click coord
+  updateGameState
+
+isGameOver :: Game Bool
+isGameOver = gets outcome >>= \case
+  Undefined -> pure False
+  otherwise -> pure True
+
+play :: Game ()
+play = untilM_ turn isGameOver
+
+
+----------
+-- Main --
+----------
 
 main :: IO ()
 main = do
-  grid <- initGrid 100
-  -- putStrLn (showGrid (freeAllTiles grid))
-  let grid' = click (fromJust $ coord [1,1]) grid
-  putStrLn (showGrid grid')
+  grid <- initGrid 2
+  res <- execStateT play (GameState grid Undefined)
+  case outcome res of
+    Win -> putStrLn "Well done, you won!"
+    Lose -> putStrLn "Oh no, you lost :("
+    Undefined -> error "something bad happened"
