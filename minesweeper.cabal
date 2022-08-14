@@ -12,6 +12,7 @@ executable minesweeper
     -dedupe
   build-depends:
       base
+    , containers
     , grids
     , microlens
     , random

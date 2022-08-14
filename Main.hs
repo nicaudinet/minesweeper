@@ -7,7 +7,8 @@ module Main where
 import Data.Functor.Compose
 import Data.Grid
 import Data.List (intercalate)
-import Data.Maybe (fromJust, isJust)
+import Data.Maybe (fromJust, isJust, catMaybes)
+import qualified Data.Set as S
 import Lens.Micro
 import Lens.Micro.Extras (view)
 import System.Random (randomRIO)
@@ -23,6 +24,10 @@ type MineField = Field Tile
 data InitTile = InitMine | InitEmpty
   deriving Eq
 type InitMineField = Field InitTile
+
+-- Needed in order to keep the coordinates in a set
+instance Ord (Coord dims) where
+  compare (Coord a) (Coord b) = compare a b
 
 -- from https://www.programming-idioms.org/idiom/158/random-sublist/2123/haskell
 randomSample ::Int -> [a] -> IO [a]
@@ -78,6 +83,58 @@ calcNeighbors = autoConvolute omitBounds (Tile Hidden . go)
 
 initGrid :: Int -> IO MineField
 initGrid numMines = fmap calcNeighbors $ fillWithMines numMines emptyGrid
+
+
+------------
+-- Update --
+------------
+
+type CoordSet = S.Set (Coord GridSize)
+
+free :: Coord GridSize -> MineField -> MineField
+free coord grid =
+  let Tile _ value = grid ^?! cell coord
+  in grid // [(coord, Tile Free value)]
+
+neighbors :: Coord GridSize -> [Coord GridSize]
+neighbors = catMaybes . map coord . neighborCoords . unCoord
+  where
+    neighborCoords :: [Int] -> [[Int]]
+    neighborCoords [] = []
+    neighborCoords (x:[]) = [ [a] | a <- [x-1, x, x+1] ]
+    neighborCoords (x:xs) = map (flip (:)) (neighborCoords xs) <*> [x-1, x, x+1]
+
+
+click :: Coord GridSize -> MineField -> MineField
+click coord grid =
+  case grid ^?! cell coord of
+    Tile _ Mine -> free coord grid
+    otherwise -> foldr free grid coords
+  where
+    f :: CoordSet -> CoordSet -> CoordSet
+    f look seen =
+      if S.null look
+      then seen
+      else uncurry f (foldr g (S.empty, seen) look)
+
+    g :: Coord GridSize -> (CoordSet, CoordSet) -> (CoordSet, CoordSet)
+    g c (look, seen) =
+      if S.member c seen
+      then (look, seen)
+      else
+        case grid ^?! cell c of
+          Tile _ Empty ->
+            let ns = S.delete c . S.fromList $ neighbors c
+            in (S.union look ns, S.insert c seen)
+          otherwise -> (look, S.insert c seen)
+
+    coords :: CoordSet
+    coords = f (S.singleton coord) S.empty
+
+
+----------
+-- Main --
+----------
 
 showGrid :: MineField -> String
 showGrid = intercalate "\n" . map showRow . toNestedLists
