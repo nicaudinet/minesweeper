@@ -16,7 +16,7 @@ data TileType = Mine | Num Int | Empty
 data TileStatus = Hidden | Free
 data Tile = Tile TileStatus TileType
 
-type GridSize = '[10,10]
+type GridSize = '[50,50]
 type Field = Grid GridSize
 type MineField = Field Tile
 
@@ -43,7 +43,7 @@ emptyGrid = generate (const InitEmpty)
 
 
 linspace :: [Int] -> [[Int]]
-linspace [] = error "Need at least one dimension for the linspace"
+linspace [] = []
 linspace (x:[]) = [ [a] | a <- [0..x-1] ]
 linspace (x:xs) = map (flip (:)) (linspace xs) <*> [0..x-1]
 
@@ -64,19 +64,17 @@ fillWithMines numMines grid = do
 calcNeighbors :: InitMineField -> MineField
 calcNeighbors = autoConvolute omitBounds (Tile Hidden . go)
   where
-    center :: Grid '[3,3] (Maybe a) -> a
-    center = fromJust . view (cell (fromJust $ coord [1,1]))
-
     countMines :: Grid '[3,3] (Maybe InitTile) -> Int
     countMines = length . filter (== Just InitMine) . mconcat . toNestedLists
 
     go :: Compose (Grid '[3,3]) Maybe InitTile -> TileType
     go (getCompose -> neigh) =
-      case center neigh of
+      case fromJust (view (cell centerCoord) neigh) of
         InitMine -> Mine
         InitEmpty ->
           let n = countMines neigh
           in if n == 0 then Empty else Num n
+
 
 initGrid :: Int -> IO MineField
 initGrid numMines = fmap calcNeighbors $ fillWithMines numMines emptyGrid
@@ -85,7 +83,7 @@ showGrid :: MineField -> String
 showGrid = intercalate "\n" . map showRow . toNestedLists
   where
     showRow :: [Tile] -> String
-    showRow = mconcat . map showTile
+    showRow = intercalate " " . map showTile
 
     showTile :: Tile -> String
     showTile (Tile Hidden _) = "#"
@@ -101,7 +99,7 @@ freeAllTiles = fmap (\(Tile _ x) -> Tile Free x)
 
 main :: IO ()
 main = do
-  grid <- initGrid 10
-  putStrLn (showGrid grid)
-  putStrLn ""
-  putStrLn (showGrid (freeAllTiles grid))
+  grid <- initGrid 100
+  -- putStrLn (showGrid (freeAllTiles grid))
+  let grid' = click (fromJust $ coord [1,1]) grid
+  putStrLn (showGrid grid')
