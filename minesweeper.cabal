@@ -16,6 +16,7 @@ executable minesweeper
     , generic-lens
     , grids
     , microlens
+    , miso
     , monad-loops
     , mtl
     , random
